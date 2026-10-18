@@ -18,13 +18,50 @@ pool.on("error", (err) => {
 });
 
 /**
- * Logs the current connection pool configuration to stdout.
+ * Returns a snapshot of the current connection pool metrics.
+ * Suitable for inclusion in health-check responses.
+ *
+ * Fields:
+ *   total       — total physical connections (idle + active)
+ *   idle        — connections sitting in the pool waiting for work
+ *   waiting     — client.connect() calls queued waiting for a free slot
+ *   min         — configured pool minimum
+ *   max         — configured pool maximum
+ *   idleTimeout — idle timeout in ms
+ *   connectionTimeout — connection acquisition timeout in ms
+ */
+export interface PoolMetrics {
+  total: number;
+  idle: number;
+  waiting: number;
+  min: number;
+  max: number;
+  idleTimeoutMs: number;
+  connectionTimeoutMs: number;
+}
+
+export function getPoolMetrics(): PoolMetrics {
+  return {
+    total: pool.totalCount,
+    idle: pool.idleCount,
+    waiting: pool.waitingCount,
+    min: serverConfig.database.poolMin,
+    max: serverConfig.database.poolMax,
+    idleTimeoutMs: serverConfig.database.idleTimeoutMs,
+    connectionTimeoutMs: serverConfig.database.connectionTimeoutMs,
+  };
+}
+
+/**
+ * Logs the current connection pool configuration and live metrics to stdout.
  * Useful for verifying pool settings on application startup.
  */
 export function logPoolMetrics() {
+  const m = getPoolMetrics();
   console.log(
-    `[db] Pool ready — min: ${serverConfig.database.poolMin}, max: ${serverConfig.database.poolMax}, ` +
-      `idleTimeout: ${serverConfig.database.idleTimeoutMs}ms, connectionTimeout: ${serverConfig.database.connectionTimeoutMs}ms`
+    `[db] Pool ready — min: ${m.min}, max: ${m.max}, ` +
+      `idleTimeout: ${m.idleTimeoutMs}ms, connectionTimeout: ${m.connectionTimeoutMs}ms | ` +
+      `live: total=${m.total}, idle=${m.idle}, waiting=${m.waiting}`
   );
 }
 

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import pool from "@/lib/db";
+import pool, { getPoolMetrics } from "@/lib/db";
 import { getRedisClient } from "@/lib/redis";
 import { serverConfig } from "@/server/config";
 
@@ -8,6 +8,17 @@ import { serverConfig } from "@/server/config";
  * GET /api/health/ready
  *
  * Returns 200 when all checks pass; 503 when any dependency is degraded.
+ *
+ * Response shape:
+ *   {
+ *     status: "ok" | "degraded",
+ *     timestamp: string,
+ *     checks: { db: "ok"|"error", redis: "ok"|"error", horizon: "ok"|"error" },
+ *     metrics: {
+ *       db: { total, idle, waiting, min, max, idleTimeoutMs, connectionTimeoutMs },
+ *       redis: { ... }
+ *     }
+ *   }
  *
  * Security: check status values are "ok" | "error" only — no connection
  * strings, stack traces, or internal details are ever returned.
@@ -23,8 +34,18 @@ export async function GET() {
   const degraded = Object.values(checks).some((s) => s === "error");
   const status = degraded ? "degraded" : "ok";
 
+  // Pool metrics are always included so operators can detect exhaustion
+  const poolMetrics = getPoolMetrics();
+
   return NextResponse.json(
-    { status, timestamp: new Date().toISOString(), checks },
+    {
+      status,
+      timestamp: new Date().toISOString(),
+      checks,
+      metrics: {
+        db: poolMetrics,
+      },
+    },
     { status: degraded ? 503 : 200 }
   );
 }

@@ -80,7 +80,7 @@ const envSchema = z
       ),
     DB_POOL_MIN: z.coerce.number().int().positive().default(2),
     DB_POOL_MAX: z.coerce.number().int().positive().default(10),
-    DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+    DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
 
     // Stellar
