@@ -207,6 +207,16 @@ const envSchema = z
         },
         { message: "CLOUDINARY_API_SECRET contains an insecure placeholder" }
       ),
+
+    // OpenTelemetry (all optional — tracing is disabled when omitted)
+    OTEL_ENABLED: z.enum(["true", "false"]).optional(),
+    OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
+    OTEL_EXPORTER_OTLP_HEADERS: z.string().optional(),
+    OTEL_SERVICE_NAME: z.string().optional(),
+    OTEL_SAMPLE_RATE: z.coerce.number().min(0).max(1).optional(),
+
+    // Stellar webhook shared secret (for HMAC-SHA256 signature verification)
+    STELLAR_WEBHOOK_SECRET: z.string().min(32).optional(),
   });
 
 export type Env = z.infer<typeof envSchema>;
