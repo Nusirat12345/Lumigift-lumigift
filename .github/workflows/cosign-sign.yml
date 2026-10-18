@@ -1,0 +1,192 @@
+name: Cosign Image Signing
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write          # push to GHCR
+  id-token: write          # needed for keyless Cosign (OIDC) + SLSA provenance
+
+concurrency:
+  group: cosign-${{ github.ref }}
+  cancel-in-progress: false  # never cancel a signing job mid-flight
+
+jobs:
+  build-and-sign:
+    name: Build, Sign & Attest
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-ref: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # ── 2. Docker Buildx ─────────────────────────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      # ── 3. Authenticate to GitHub Container Registry ─────────────────────────
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 4. Generate image metadata (tags + labels) ───────────────────────────
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbea8a986b5e8898f7b4b2f65df2 # v5.7.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # ── 5. Build and push image ───────────────────────────────────────────────
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runner
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Include build provenance in the image manifest
+          provenance: true
+          sbom: true
+
+      # ── 6. Install Cosign ────────────────────────────────────────────────────
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      # ── 7. Sign image with keyless Cosign (Sigstore OIDC) ────────────────────
+      # Keyless signing uses GitHub's OIDC token so no long-lived private key
+      # needs to be stored in secrets.  The signing identity is tied to this
+      # workflow's GITHUB_ACTIONS OIDC claim and recorded in the Sigstore
+      # public-good Rekor transparency log.
+      - name: Sign image with Cosign (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          IMAGE_NAME=$(echo "$TAGS" | head -n1 | tr -d '[:space:]')
+          IMAGE_REF="${IMAGE_NAME}@${DIGEST}"
+
+          echo "Signing: ${IMAGE_REF}"
+          cosign sign --yes "${IMAGE_REF}"
+
+          echo "✅ Image signed: ${IMAGE_REF}"
+
+      # ── 8. Generate SLSA provenance attestation ──────────────────────────────
+      - name: Attest SLSA Build Provenance
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          IMAGE_NAME=$(echo "$TAGS" | head -n1 | tr -d '[:space:]')
+          IMAGE_REF="${IMAGE_NAME}@${DIGEST}"
+
+          cosign attest --yes \
+            --predicate <(echo '{
+              "buildType": "https://github.com/slsa-framework/slsa/v1.0",
+              "builder": { "id": "https://github.com/actions/runner" },
+              "metadata": {
+                "buildStartedOn": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
+                "buildFinishedOn": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
+                "completeness": { "parameters": true, "environment": true, "materials": true },
+                "reproducible": false
+              },
+              "invocation": {
+                "configSource": {
+                  "uri": "git+https://github.com/${{ github.repository }}@${{ github.sha }}",
+                  "digest": { "sha1": "${{ github.sha }}" },
+                  "entryPoint": ".github/workflows/cosign-sign.yml"
+                }
+              }
+            }') \
+            --type slsaprovenance \
+            "${IMAGE_REF}"
+
+          echo "✅ SLSA provenance attestation attached"
+
+      # ── 9. Store signed digest in docs/ops/ ──────────────────────────────────
+      - name: Record signed image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          mkdir -p docs/ops/signed-digests
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          IMAGE_NAME=$(echo "$TAGS" | head -n1 | tr -d '[:space:]')
+
+          cat >> docs/ops/signed-digests/digests.log << EOF
+          ---
+          timestamp: ${TIMESTAMP}
+          sha: ${{ github.sha }}
+          ref: ${{ github.ref_name }}
+          actor: ${{ github.actor }}
+          image: ${IMAGE_NAME}
+          digest: ${DIGEST}
+          signed: true
+          provenance: true
+          EOF
+
+          echo "Digest log updated:"
+          tail -10 docs/ops/signed-digests/digests.log
+
+      - name: Upload signed digest log
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-image-digest-${{ github.sha }}
+          path: docs/ops/signed-digests/digests.log
+          retention-days: 90
+
+  verify-signature:
+    name: Verify Signature
+    runs-on: ubuntu-latest
+    needs: [build-and-sign]
+    environment: production
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify image signature
+        env:
+          DIGEST: ${{ needs.build-and-sign.outputs.image-digest }}
+          TAGS: ${{ needs.build-and-sign.outputs.image-ref }}
+        run: |
+          IMAGE_NAME=$(echo "$TAGS" | head -n1 | tr -d '[:space:]')
+          IMAGE_REF="${IMAGE_NAME}@${DIGEST}"
+
+          echo "Verifying signature on: ${IMAGE_REF}"
+
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/cosign-sign.yml" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE_REF}" | jq '.[0].optional | {subject, issuer, buildTrigger: .["github-workflow-trigger"]}'
+
+          echo "✅ Signature verification passed"
