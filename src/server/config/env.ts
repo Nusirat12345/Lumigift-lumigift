@@ -207,6 +207,10 @@ const envSchema = z
         },
         { message: "CLOUDINARY_API_SECRET contains an insecure placeholder" }
       ),
+
+    // Stellar webhook shared secret (for HMAC-SHA256 signature verification)
+    // Used by POST /api/v1/webhooks/stellar
+    STELLAR_WEBHOOK_SECRET: z.string().min(32).optional(),
   });
 
 export type Env = z.infer<typeof envSchema>;
